@@ -1,6 +1,5 @@
 import time
 import math
-import random
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
@@ -11,13 +10,10 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Takt-Animation", layout="wide")
 
 # -----------------------------
-# Helpers: simple takt flow model
+# Helpers
 # -----------------------------
 def build_layout(n_areas: int, cols: int):
-    """
-    Returns dict: area_id -> (row, col) in a grid.
-    area_id is 1..n_areas
-    """
+    """area_id 1..n_areas -> (row, col) grid position"""
     cols = max(1, cols)
     rows = math.ceil(n_areas / cols)
     layout = {}
@@ -28,59 +24,66 @@ def build_layout(n_areas: int, cols: int):
         layout[area] = (r, c)
     return layout, rows, cols
 
-def simulate_positions(
-    t: int,
-    n_areas: int,
-    trades: list[str],
-    start_offsets: list[int],
-    takt_time: int,
-):
+def simulate_positions(t: int, n_areas: int, trades: list[str], start_offsets: list[int], takt_time: int):
     """
-    Deterministic takt: each trade moves one area every takt_time steps.
-    Returns positions dict trade -> area (or 0 if not started / finished).
+    Each trade moves one area every takt_time steps.
+    Returns trade -> area (0 if not started/finished)
     """
     pos = {}
-    max_area = n_areas
     for trade, off in zip(trades, start_offsets):
         if t < off:
-            pos[trade] = 0  # not started
+            pos[trade] = 0
             continue
-        # how many takt moves have happened since start
         k = (t - off) // takt_time
         area = 1 + k
-        if area > max_area:
-            pos[trade] = 0  # finished (hide)
-        else:
-            pos[trade] = area
+        pos[trade] = area if 1 <= area <= n_areas else 0
     return pos
 
-def build_takttreppe_series(
+def build_takttreppe_series_upto(
     n_areas: int,
     trades: list[str],
     start_offsets: list[int],
     takt_time: int,
-    t_max: int,
+    t_upto: int,
 ):
     """
-    Series for Takttreppe: for each trade, create x(time), y(area) arrays.
-    Step-like by repeating points.
+    Build step-lines ONLY up to current time t_upto.
     """
     series = {}
     for trade, off in zip(trades, start_offsets):
-        xs = []
-        ys = []
+        xs, ys = [], []
+        if t_upto < off:
+            series[trade] = (xs, ys)
+            continue
+
+        # We add horizontal segments for each area that has started by t_upto
         for area in range(1, n_areas + 1):
             t_start = off + (area - 1) * takt_time
             t_end = t_start + takt_time
-            if t_start > t_max:
+            if t_start > t_upto:
                 break
-            xs.extend([t_start, min(t_end, t_max)])
+
+            # segment is [t_start, min(t_end, t_upto)]
+            xs.extend([t_start, min(t_end, t_upto)])
             ys.extend([area, area])
+
         series[trade] = (xs, ys)
     return series
 
+def make_color_map(trades: list[str]):
+    """
+    Consistent colors across layout + takttreppe.
+    (Plotly-like palette; extend if needed)
+    """
+    palette = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+        "#bcbd22", "#17becf", "#4c78a8", "#f58518",
+    ]
+    return {tr: palette[i % len(palette)] for i, tr in enumerate(trades)}
+
 # -----------------------------
-# UI: Controls
+# UI
 # -----------------------------
 st.title("Takt-Animation: Gewerkezug + Takttreppe")
 
@@ -88,7 +91,7 @@ with st.sidebar:
     st.header("Einstellungen")
 
     n_areas = st.slider("Anzahl Taktbereiche", 6, 60, 24, 1)
-    cols = st.slider("Layout-Spalten (Kachel-Grid)", 3, 12, 8, 1)
+    grid_cols = st.slider("Layout-Spalten (Kachel-Grid)", 3, 12, 8, 1)
 
     trades_default = ["Trockenbau", "Elektro", "HLS", "Estrich", "Maler", "Fliesen", "Boden", "Schreiner"]
     n_trades = st.slider("Anzahl Gewerke", 2, 12, 8, 1)
@@ -107,16 +110,17 @@ with st.sidebar:
             start_offsets.append(
                 st.number_input(
                     f"{tr}: Start bei t=",
-                    min_value=0, max_value=500,
+                    min_value=0,
+                    max_value=5000,
                     value=i * takt_time,
-                    step=1
+                    step=1,
                 )
             )
 
     st.subheader("Animation")
     speed_ms = st.slider("Geschwindigkeit (ms pro Frame)", 150, 1500, 450, 50)
     t_max_default = max(120, n_areas * takt_time + n_trades * takt_time)
-    t_max = st.slider("Simulationsdauer (Zeitschritte)", 30, 600, t_max_default, 10)
+    t_max = st.slider("Simulationsdauer (Zeitschritte)", 30, 2000, t_max_default, 10)
 
 # -----------------------------
 # Session state for animation
@@ -140,7 +144,7 @@ with c3:
 with c4:
     st.write(f"**Zeit t = {st.session_state.t}** / {t_max}")
 
-# Auto-refresh tick (real animation)
+# Tick (real animation)
 if st.session_state.run:
     time.sleep(speed_ms / 1000.0)
     st.session_state.t += 1
@@ -149,23 +153,18 @@ if st.session_state.run:
     st.rerun()
 
 # -----------------------------
-# Build figures
+# Compute current state
 # -----------------------------
-layout_map, rows, cols_eff = build_layout(n_areas, cols)
+t_current = int(st.session_state.t)
+layout_map, rows, cols_eff = build_layout(n_areas, grid_cols)
+positions = simulate_positions(t_current, n_areas, trades, start_offsets, takt_time)
+color_map = make_color_map(trades)
 
-positions = simulate_positions(
-    t=st.session_state.t,
-    n_areas=n_areas,
-    trades=trades,
-    start_offsets=start_offsets,
-    takt_time=takt_time,
-)
-
-# ---- Figure A: Layout with moving trades
+# -----------------------------
+# Figure A: Layout with moving trades (colored)
+# -----------------------------
 fig_layout = go.Figure()
-
-tile_w = 1.0
-tile_h = 1.0
+tile_w, tile_h = 1.0, 1.0
 
 for area, (r, c) in layout_map.items():
     x0 = c * tile_w
@@ -186,29 +185,31 @@ for area, (r, c) in layout_map.items():
         text=str(area),
         showarrow=False,
         font=dict(size=11),
-        opacity=0.65,
+        opacity=0.35,
     )
 
-xs, ys, labels = [], [], []
+# One marker per trade with its own color
+xs, ys, labels, colors = [], [], [], []
 for tr in trades:
     area = positions.get(tr, 0)
     if area == 0:
         continue
     r, c = layout_map[area]
-    x = c * tile_w + 0.5 * tile_w
-    y = (rows - 1 - r) * tile_h + 0.5 * tile_h
-    xs.append(x)
-    ys.append(y)
+    xs.append(c * tile_w + 0.5 * tile_w)
+    ys.append((rows - 1 - r) * tile_h + 0.5 * tile_h)
     labels.append(tr)
+    colors.append(color_map[tr])
 
 fig_layout.add_trace(
     go.Scatter(
-        x=xs, y=ys,
+        x=xs,
+        y=ys,
         mode="markers+text",
         text=labels,
         textposition="top center",
-        marker=dict(size=18),
+        marker=dict(size=18, color=colors, line=dict(width=1)),
         hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
     )
 )
 
@@ -221,35 +222,68 @@ fig_layout.update_layout(
 )
 fig_layout.update_yaxes(scaleanchor="x", scaleratio=1)
 
-# ---- Figure B: Takttreppe
-series = build_takttreppe_series(
+# -----------------------------
+# Figure B: Takttreppe up to current time + current points
+# -----------------------------
+series = build_takttreppe_series_upto(
     n_areas=n_areas,
     trades=trades,
     start_offsets=start_offsets,
     takt_time=takt_time,
-    t_max=t_max,
+    t_upto=t_current,
 )
 
 fig_step = go.Figure()
+
+# Step-lines only up to current time, with consistent colors
 for tr, (x, y) in series.items():
     fig_step.add_trace(
         go.Scatter(
-            x=x, y=y,
+            x=x,
+            y=y,
             mode="lines",
             name=tr,
+            line=dict(color=color_map[tr], width=2),
             hovertemplate=f"{tr}<br>t=%{{x}}<br>Taktbereich=%{{y}}<extra></extra>",
         )
     )
 
-fig_step.add_vline(x=st.session_state.t, line_width=2)
+# Current position markers at x = t_current
+cur_xs, cur_ys, cur_cols, cur_text = [], [], [], []
+for tr in trades:
+    area = positions.get(tr, 0)
+    if area == 0:
+        continue
+    cur_xs.append(t_current)
+    cur_ys.append(area)
+    cur_cols.append(color_map[tr])
+    cur_text.append(tr)
+
+fig_step.add_trace(
+    go.Scatter(
+        x=cur_xs,
+        y=cur_ys,
+        mode="markers",
+        marker=dict(size=10, color=cur_cols, line=dict(width=1)),
+        text=cur_text,
+        hovertemplate="%{text}<br>t=%{x}<br>Taktbereich=%{y}<extra></extra>",
+        showlegend=False,
+    )
+)
+
+# Current time vertical line
+fig_step.add_vline(x=t_current, line_width=2)
 
 fig_step.update_layout(
     height=520,
     margin=dict(l=10, r=10, t=40, b=10),
-    title="Takttreppe: Zeit (x) vs. Taktbereich (y)",
+    title="Takttreppe: Zeit (x) vs. Taktbereich (y) — nur bis aktuelle Zeit t",
     xaxis_title="Zeit (Zeitschritte)",
     yaxis_title="Taktbereich",
 )
+
+# Keep x-axis stable to t_max (optional). If you prefer "growing x-axis", set range=[0, max(1,t_current)]
+fig_step.update_xaxes(range=[0, max(1, t_max)])
 
 fig_step.update_yaxes(
     autorange="reversed",  # optional: oben = Bereich 1
