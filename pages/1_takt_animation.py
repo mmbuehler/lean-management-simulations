@@ -1,216 +1,275 @@
-# pages/1_takt_animation.py
-import streamlit as st
-import pandas as pd
+import time
+import math
+import random
 import numpy as np
+import streamlit as st
 import plotly.graph_objects as go
-from dataclasses import dataclass, asdict
 
 # -----------------------------
-# 1) Streamlit setup
+# Page config
 # -----------------------------
-st.set_page_config(page_title="Takt Animation", layout="wide")
-st.title("Takt-Control – Animation (Prototype)")
+st.set_page_config(page_title="Takt-Animation", layout="wide")
 
 # -----------------------------
-# 2) Config / Data model
+# Helpers: simple takt flow model
 # -----------------------------
-@dataclass
-class Trade:
-    name: str
-    base_duration: int      # in "work units"
-    crew: int
-    var: float = 0.0        # variability (0..)
-    rework_p: float = 0.0   # probability of rework step
+def build_layout(n_areas: int, cols: int):
+    """
+    Returns dict: area_id -> (row, col) in a grid.
+    area_id is 1..n_areas
+    """
+    cols = max(1, cols)
+    rows = math.ceil(n_areas / cols)
+    layout = {}
+    for i in range(n_areas):
+        area = i + 1
+        r = i // cols
+        c = i % cols
+        layout[area] = (r, c)
+    return layout, rows, cols
 
-@dataclass
-class Config:
-    seed: int = 1
-    takt_time: int = 3
-    rows: int = 2               # e.g., floors
-    cols: int = 8               # e.g., rooms per floor
-    steps: int = 30
-    harmonized: bool = False
-    speed_ms: int = 200
+def simulate_positions(
+    t: int,
+    n_areas: int,
+    trades: list[str],
+    start_offsets: list[int],
+    takt_time: int,
+):
+    """
+    Deterministic takt: each trade moves one area every takt_time steps.
+    Returns positions dict trade -> area (or 0 if not started / finished).
+    """
+    pos = {}
+    max_area = n_areas
+    for trade, off in zip(trades, start_offsets):
+        if t < off:
+            pos[trade] = 0  # not started
+            continue
+        # how many takt moves have happened since start
+        k = (t - off) // takt_time
+        area = 1 + k
+        if area > max_area:
+            pos[trade] = 0  # finished (hide)
+        else:
+            pos[trade] = area
+    return pos
 
-def default_trades(harmonized: bool) -> list[Trade]:
-    # TODO: later: load from YAML/JSON
-    if not harmonized:
-        return [
-            Trade("Trockenbau", 3, 1, var=0.3),
-            Trade("Elektro", 4, 2, var=0.2),
-            Trade("HLS", 3, 2, var=0.2),
-            Trade("Maler", 2, 1, var=0.1),
-        ]
+def build_takttreppe_series(
+    n_areas: int,
+    trades: list[str],
+    start_offsets: list[int],
+    takt_time: int,
+    t_max: int,
+):
+    """
+    Series for Takttreppe: for each trade, create x(time), y(area) arrays.
+    Step-like by repeating points.
+    """
+    series = {}
+    for trade, off in zip(trades, start_offsets):
+        xs = []
+        ys = []
+        # area 1..n_areas each takt_time
+        for area in range(1, n_areas + 1):
+            t_start = off + (area - 1) * takt_time
+            t_end = t_start + takt_time
+            if t_start > t_max:
+                break
+            # step: hold y constant across [t_start, t_end)
+            xs.extend([t_start, min(t_end, t_max)])
+            ys.extend([area, area])
+        series[trade] = (xs, ys)
+    return series
+
+# -----------------------------
+# UI: Controls
+# -----------------------------
+st.title("Takt-Animation: Gewerkezug + Takttreppe")
+
+with st.sidebar:
+    st.header("Einstellungen")
+
+    n_areas = st.slider("Anzahl Taktbereiche", 6, 60, 24, 1)
+    cols = st.slider("Layout-Spalten (Kachel-Grid)", 3, 12, 8, 1)
+
+    trades_default = ["Trockenbau", "Elektro", "HLS", "Estrich", "Maler", "Fliesen", "Boden", "Schreiner"]
+    n_trades = st.slider("Anzahl Gewerke", 2, 12, 8, 1)
+    trades = trades_default[:n_trades]
+
+    takt_time = st.slider("Taktzeit (Zeitschritte je Bereich)", 1, 10, 3, 1)
+
+    st.subheader("Versatz (Start) je Gewerk")
+    auto_offsets = st.checkbox("Automatisch staffeln (klassischer Gewerkezug)", value=True)
+    if auto_offsets:
+        start_offsets = [i * takt_time for i in range(n_trades)]
+        st.caption(f"Start-Offsets: {start_offsets}")
     else:
-        # Harmonisierung: z.B. näher an takt_time ziehen
-        return [
-            Trade("Trockenbau", 3, 1, var=0.15),
-            Trade("Elektro", 3, 2, var=0.15),
-            Trade("HLS", 3, 2, var=0.15),
-            Trade("Maler", 3, 1, var=0.15),
-        ]
+        start_offsets = []
+        for i, tr in enumerate(trades):
+            start_offsets.append(st.number_input(f"{tr}: Start bei t=", min_value=0, max_value=500, value=i * takt_time, step=1))
 
-# Sidebar controls
-st.sidebar.header("Einstellungen")
-cfg = Config(
-    seed=st.sidebar.number_input("Random seed", 0, 10_000, 7),
-    takt_time=st.sidebar.slider("Taktzeit (Einheiten)", 1, 10, 3),
-    rows=st.sidebar.slider("Taktbereiche – Reihen", 1, 6, 2),
-    cols=st.sidebar.slider("Taktbereiche – Spalten", 2, 20, 8),
-    steps=st.sidebar.slider("Simulationstakte", 5, 200, 40),
-    harmonized=st.sidebar.checkbox("Harmonisiert", value=False),
-    speed_ms=st.sidebar.slider("Abspielgeschwindigkeit (ms)", 50, 800, 200),
+    st.subheader("Animation")
+    speed_ms = st.slider("Geschwindigkeit (ms pro Frame)", 150, 1500, 450, 50)
+    t_max = st.slider("Simulationsdauer (Zeitschritte)", 30, 600, max(120, n_areas * takt_time + n_trades * takt_time), 10)
+
+# -----------------------------
+# Session state for animation
+# -----------------------------
+if "run" not in st.session_state:
+    st.session_state.run = False
+if "t" not in st.session_state:
+    st.session_state.t = 0
+
+c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+with c1:
+    if st.button("▶ Play", use_container_width=True):
+        st.session_state.run = True
+with c2:
+    if st.button("⏸ Pause", use_container_width=True):
+        st.session_state.run = False
+with c3:
+    if st.button("↺ Reset", use_container_width=True):
+        st.session_state.run = False
+        st.session_state.t = 0
+
+with c4:
+    st.write(f"**Zeit t = {st.session_state.t}** / {t_max}")
+
+# Auto-refresh tick (real animation)
+if st.session_state.run:
+    st_autorefresh = st.experimental_data_editor  # dummy to avoid lint confusion
+    st.experimental_rerun  # keep reference
+
+    # Use Streamlit's autorefresh via a small trick:
+    # We sleep and rerun. This works reliably both local + cloud.
+    time.sleep(speed_ms / 1000.0)
+    st.session_state.t += 1
+    if st.session_state.t > t_max:
+        st.session_state.t = 0
+    st.rerun()
+
+# -----------------------------
+# Build figures
+# -----------------------------
+layout_map, rows, cols_eff = build_layout(n_areas, cols)
+
+positions = simulate_positions(
+    t=st.session_state.t,
+    n_areas=n_areas,
+    trades=trades,
+    start_offsets=start_offsets,
+    takt_time=takt_time,
 )
 
-trades = default_trades(cfg.harmonized)
+# ---- Figure A: Layout with moving trades
+fig_layout = go.Figure()
 
-# -----------------------------
-# 3) Simulation engine
-# -----------------------------
-def init_state(cfg: Config, trades: list[Trade]) -> dict:
-    rng = np.random.default_rng(cfg.seed)
-    # Each trade starts before first cell (pos = -1)
-    return {
-        "rng": rng,
-        "trade_pos": {t.name: -1 for t in trades},        # linear index 0..(rows*cols-1)
-        "trade_rem": {t.name: 0 for t in trades},         # remaining work in current cell
-        "done_cells": {t.name: set() for t in trades},    # completed cells
-    }
+# Draw tiles as shapes
+tile_w = 1.0
+tile_h = 1.0
 
-def sample_duration(rng, trade: Trade, takt_time: int) -> int:
-    # Simple variability model (you can improve later)
-    base = trade.base_duration
-    if trade.var <= 0:
-        return base
-    delta = int(np.round(rng.normal(0, trade.var * base)))
-    d = max(1, base + delta)
-    return d
+for area, (r, c) in layout_map.items():
+    x0 = c * tile_w
+    y0 = (rows - 1 - r) * tile_h  # invert y so first row is top
+    x1 = x0 + tile_w
+    y1 = y0 + tile_h
 
-def step(state: dict, cfg: Config, trades: list[Trade], t: int) -> list[dict]:
-    """One takt step. Returns event rows."""
-    rng = state["rng"]
-    events = []
-    n_cells = cfg.rows * cfg.cols
-
-    # occupancy: which trade is currently in which cell
-    occ = {}
-    for tr in trades:
-        pos = state["trade_pos"][tr.name]
-        if pos >= 0 and pos < n_cells:
-            occ[pos] = tr.name
-
-    # process trades in order (trade train)
-    for tr in trades:
-        name = tr.name
-        pos = state["trade_pos"][name]
-
-        # if not yet started, try to enter cell 0
-        if pos == -1:
-            next_pos = 0
-        else:
-            next_pos = pos + 1
-
-        # If currently working in a cell, decrement remaining
-        if pos >= 0 and state["trade_rem"][name] > 0:
-            state["trade_rem"][name] -= cfg.takt_time
-            status = "working"
-            if state["trade_rem"][name] <= 0:
-                state["done_cells"][name].add(pos)
-                status = "completed"
-            events.append({"takt": t, "trade": name, "pos": pos, "status": status})
-            continue
-
-        # If completed current cell (or idle), try to move forward
-        if next_pos >= n_cells:
-            events.append({"takt": t, "trade": name, "pos": pos, "status": "finished_all"})
-            continue
-
-        # Blocking: next cell occupied by another trade
-        if next_pos in occ:
-            events.append({"takt": t, "trade": name, "pos": pos, "status": "blocked"})
-            continue
-
-        # Move into next cell and start work
-        state["trade_pos"][name] = next_pos
-        occ[next_pos] = name
-        dur = sample_duration(rng, tr, cfg.takt_time)
-        state["trade_rem"][name] = dur
-        events.append({"takt": t, "trade": name, "pos": next_pos, "status": "start"})
-    return events
-
-def run_sim(cfg: Config, trades: list[Trade]) -> pd.DataFrame:
-    state = init_state(cfg, trades)
-    all_events = []
-    for t in range(cfg.steps):
-        all_events.extend(step(state, cfg, trades, t))
-    return pd.DataFrame(all_events)
-
-timeline = run_sim(cfg, trades)
-
-# -----------------------------
-# 4) KPIs
-# -----------------------------
-def compute_kpis(timeline: pd.DataFrame, cfg: Config) -> dict:
-    k = {}
-    k["events"] = len(timeline)
-    k["blocked"] = int((timeline["status"] == "blocked").sum())
-    k["starts"] = int((timeline["status"] == "start").sum())
-    k["completed"] = int((timeline["status"] == "completed").sum())
-    return k
-
-kpis = compute_kpis(timeline, cfg)
-
-# -----------------------------
-# 5) Visualization
-# -----------------------------
-def grid_frame(timeline: pd.DataFrame, cfg: Config, takt: int) -> np.ndarray:
-    """Return grid with trade index or -1."""
-    grid = -1 * np.ones((cfg.rows, cfg.cols), dtype=int)
-    df = timeline[timeline["takt"] == takt]
-    trade_names = [t.name for t in trades]
-    idx = {name: i for i, name in enumerate(trade_names)}
-    for _, r in df.iterrows():
-        if r["pos"] >= 0:
-            rr = r["pos"] // cfg.cols
-            cc = r["pos"] % cfg.cols
-            grid[rr, cc] = idx[r["trade"]]
-    return grid
-
-def plot_grid(grid: np.ndarray, trades: list[Trade], title: str):
-    # Plotly heatmap with numeric categories
-    fig = go.Figure(data=go.Heatmap(
-        z=grid,
-        coloraxis="coloraxis",
-        showscale=False,
-        hovertemplate="Row %{y}<br>Col %{x}<br>Trade %{z}<extra></extra>",
-    ))
-    fig.update_layout(
-        title=title,
-        height=450,
-        margin=dict(l=20, r=20, t=60, b=20),
-        coloraxis=dict(colorscale="Viridis"),
-        xaxis=dict(showgrid=True, zeroline=False),
-        yaxis=dict(showgrid=True, zeroline=False, autorange="reversed"),
+    fig_layout.add_shape(
+        type="rect",
+        x0=x0, y0=y0, x1=x1, y1=y1,
+        line=dict(width=1),
+        fillcolor="rgba(0,0,0,0)",
+        layer="below",
     )
-    return fig
+    fig_layout.add_annotation(
+        x=x0 + 0.5*tile_w,
+        y=y0 + 0.5*tile_h,
+        text=str(area),
+        showarrow=False,
+        font=dict(size=11),
+        opacity=0.65,
+    )
+
+# Plot trade positions
+xs, ys, labels = [], [], []
+for tr in trades:
+    area = positions.get(tr, 0)
+    if area == 0:
+        continue
+    r, c = layout_map[area]
+    x = c * tile_w + 0.5 * tile_w
+    y = (rows - 1 - r) * tile_h + 0.5 * tile_h
+    xs.append(x)
+    ys.append(y)
+    labels.append(tr)
+
+fig_layout.add_trace(
+    go.Scatter(
+        x=xs, y=ys,
+        mode="markers+text",
+        text=labels,
+        textposition="top center",
+        marker=dict(size=18),
+        hovertemplate="%{text}<extra></extra>",
+    )
+)
+
+fig_layout.update_layout(
+    height=520,
+    margin=dict(l=10, r=10, t=40, b=10),
+    title="Layout: Taktbereiche (Kacheln) + aktueller Standort der Gewerke",
+    xaxis=dict(visible=False),
+    yaxis=dict(visible=False),
+)
+
+# lock aspect ratio
+fig_layout.update_yaxes(scaleanchor="x", scaleratio=1)
+
+# ---- Figure B: Takttreppe
+series = build_takttreppe_series(
+    n_areas=n_areas,
+    trades=trades,
+    start_offsets=start_offsets,
+    takt_time=takt_time,
+    t_max=t_max,
+)
+
+fig_step = go.Figure()
+for tr, (x, y) in series.items():
+    fig_step.add_trace(
+        go.Scatter(
+            x=x, y=y,
+            mode="lines",
+            name=tr,
+            hovertemplate=f"{tr}<br>t=%{{x}}<br>Taktbereich=%{{y}}<extra></extra>"
+        )
+    )
+
+# add "current time" vertical line
+fig_step.add_vline(x=st.session_state.t, line_width=2)
+
+fig_step.update_layout(
+    height=520,
+    margin=dict(l=10, r=10, t=40, b=10),
+    title="Takttreppe: Zeit (x) vs. Taktbereich (y)",
+    xaxis_title="Zeit (Zeitschritte)",
+    yaxis_title="Taktbereich",
+)
+
+fig_step.update_yaxes(
+    autorange="reversed",  # optional: oben = Bereich 1
+    tickmode="linear",
+    tick0=1,
+    dtick=1
+)
 
 # -----------------------------
-# 6) UI
+# Render side-by-side
 # -----------------------------
-col1, col2 = st.columns([2, 1])
+left, right = st.columns([1, 1])
+with left:
+    st.plotly_chart(fig_layout, use_container_width=True)
+with right:
+    st.plotly_chart(fig_step, use_container_width=True)
 
-with col2:
-    st.subheader("KPIs")
-    st.metric("Starts", kpis["starts"])
-    st.metric("Blocked", kpis["blocked"])
-    st.metric("Completed", kpis["completed"])
-    st.caption("Prototype-KPIs – werden im nächsten Schritt präzisiert.")
-
-with col1:
-    takt = st.slider("Takt", 0, cfg.steps - 1, 0)
-    grid = grid_frame(timeline, cfg, takt)
-    fig = plot_grid(grid, trades, title=f"Takt {takt}")
-    st.plotly_chart(fig, use_container_width=True)
-
-with st.expander("Timeline (debug)"):
-    st.dataframe(timeline, use_container_width=True)
+st.caption("Hinweis: Navigation erfolgt über Streamlit 'pages/'. Bitte kein eigenes Sidebar-Routing in app.py verwenden.")
