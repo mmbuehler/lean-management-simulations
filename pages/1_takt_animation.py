@@ -69,13 +69,11 @@ def build_takttreppe_series(
     for trade, off in zip(trades, start_offsets):
         xs = []
         ys = []
-        # area 1..n_areas each takt_time
         for area in range(1, n_areas + 1):
             t_start = off + (area - 1) * takt_time
             t_end = t_start + takt_time
             if t_start > t_max:
                 break
-            # step: hold y constant across [t_start, t_end)
             xs.extend([t_start, min(t_end, t_max)])
             ys.extend([area, area])
         series[trade] = (xs, ys)
@@ -106,11 +104,19 @@ with st.sidebar:
     else:
         start_offsets = []
         for i, tr in enumerate(trades):
-            start_offsets.append(st.number_input(f"{tr}: Start bei t=", min_value=0, max_value=500, value=i * takt_time, step=1))
+            start_offsets.append(
+                st.number_input(
+                    f"{tr}: Start bei t=",
+                    min_value=0, max_value=500,
+                    value=i * takt_time,
+                    step=1
+                )
+            )
 
     st.subheader("Animation")
     speed_ms = st.slider("Geschwindigkeit (ms pro Frame)", 150, 1500, 450, 50)
-    t_max = st.slider("Simulationsdauer (Zeitschritte)", 30, 600, max(120, n_areas * takt_time + n_trades * takt_time), 10)
+    t_max_default = max(120, n_areas * takt_time + n_trades * takt_time)
+    t_max = st.slider("Simulationsdauer (Zeitschritte)", 30, 600, t_max_default, 10)
 
 # -----------------------------
 # Session state for animation
@@ -131,17 +137,11 @@ with c3:
     if st.button("↺ Reset", use_container_width=True):
         st.session_state.run = False
         st.session_state.t = 0
-
 with c4:
     st.write(f"**Zeit t = {st.session_state.t}** / {t_max}")
 
 # Auto-refresh tick (real animation)
 if st.session_state.run:
-    st_autorefresh = st.experimental_data_editor  # dummy to avoid lint confusion
-    st.experimental_rerun  # keep reference
-
-    # Use Streamlit's autorefresh via a small trick:
-    # We sleep and rerun. This works reliably both local + cloud.
     time.sleep(speed_ms / 1000.0)
     st.session_state.t += 1
     if st.session_state.t > t_max:
@@ -164,7 +164,6 @@ positions = simulate_positions(
 # ---- Figure A: Layout with moving trades
 fig_layout = go.Figure()
 
-# Draw tiles as shapes
 tile_w = 1.0
 tile_h = 1.0
 
@@ -182,15 +181,14 @@ for area, (r, c) in layout_map.items():
         layer="below",
     )
     fig_layout.add_annotation(
-        x=x0 + 0.5*tile_w,
-        y=y0 + 0.5*tile_h,
+        x=x0 + 0.5 * tile_w,
+        y=y0 + 0.5 * tile_h,
         text=str(area),
         showarrow=False,
         font=dict(size=11),
         opacity=0.65,
     )
 
-# Plot trade positions
 xs, ys, labels = [], [], []
 for tr in trades:
     area = positions.get(tr, 0)
@@ -221,8 +219,6 @@ fig_layout.update_layout(
     xaxis=dict(visible=False),
     yaxis=dict(visible=False),
 )
-
-# lock aspect ratio
 fig_layout.update_yaxes(scaleanchor="x", scaleratio=1)
 
 # ---- Figure B: Takttreppe
@@ -241,11 +237,10 @@ for tr, (x, y) in series.items():
             x=x, y=y,
             mode="lines",
             name=tr,
-            hovertemplate=f"{tr}<br>t=%{{x}}<br>Taktbereich=%{{y}}<extra></extra>"
+            hovertemplate=f"{tr}<br>t=%{{x}}<br>Taktbereich=%{{y}}<extra></extra>",
         )
     )
 
-# add "current time" vertical line
 fig_step.add_vline(x=st.session_state.t, line_width=2)
 
 fig_step.update_layout(
@@ -260,7 +255,7 @@ fig_step.update_yaxes(
     autorange="reversed",  # optional: oben = Bereich 1
     tickmode="linear",
     tick0=1,
-    dtick=1
+    dtick=1,
 )
 
 # -----------------------------
