@@ -3,3 +3,4 @@ simpy
 numpy
 pandas
 matplotlib
+plotly
